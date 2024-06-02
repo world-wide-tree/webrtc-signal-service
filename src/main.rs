@@ -16,8 +16,8 @@ use webrtc::{api::media_engine::MediaEngine, ice_transport::ice_candidate::RTCIc
 
 #[derive(Clone)]
 struct AppState {
-    cameras: HashMap<String, RTCSessionDescription>,
-    offer: HashMap<String, RTCSessionDescription>
+    offers: HashMap<String, RTCSessionDescription>, // Cameras
+    answers: HashMap<String, RTCSessionDescription> // Clients
 }
 
 
@@ -49,15 +49,15 @@ async fn main() {
 
     serve(listener,route).await.unwrap();
 }
-async fn offer_handler(
+async fn answer_handler(
     Path(camera_id): Path<String>,
     axum::extract::Extension(state): axum::extract::Extension<Arc<Mutex<AppState>>>,
     Json(sdp): Json<RTCSessionDescription>
 )->impl IntoResponse{
     let mut state = state.lock().await;
-    if let Some(s) = state.cameras.get(&camera_id){
+    if let Some(s) = state.offers.get(&camera_id){
         let s = s.clone();
-        let _ = state.offer.insert(camera_id, sdp);
+        let _ = state.answers.insert(camera_id, sdp);
         Json(s).into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
@@ -67,20 +67,20 @@ async fn get_signal(
     Path(camera_id): Path<String>,
     axum::extract::Extension(state): axum::extract::Extension<Arc<Mutex<AppState>>>,
 ) -> impl IntoResponse{
-    let mut state = state.lock().await;
-    if let Some(sdp) = state.offer.get(&camera_id){
+    let state = state.lock().await;
+    if let Some(sdp) = state.answers.get(&camera_id){
         Json(sdp.clone()).into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
 }
-async fn answer_handler(
+async fn offer_handler(
     Path(camera_id): Path<String>,
     axum::extract::Extension(state): axum::extract::Extension<Arc<Mutex<AppState>>>,
     Json(sdp): Json<RTCSessionDescription>
 ){
     let mut state = state.lock().await;
-    state.cameras.insert(camera_id, sdp);
+    state.offers.insert(camera_id, sdp);
 
 }
 // async fn ws_handler(
