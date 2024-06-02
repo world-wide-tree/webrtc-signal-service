@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.7.5"
+axum = { version = "0.7.5", features = ["ws"] }
+axum-extra = "0.9.3"
+headers = "0.4.0"
 serde = { version = "1.0.203", features = ["derive"] }
 tokio = { version = "1.38.0", features = ["full"] }
+tower = "0.4.13"
 webrtc = "0.11.0"
