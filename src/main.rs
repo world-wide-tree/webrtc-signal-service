@@ -9,99 +9,112 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{extract::{ws::WebSocket, ConnectInfo, Path, WebSocketUpgrade}, http::StatusCode, response::IntoResponse, routing::{get, post}, serve, Json, Router};
+use axum::{extract::{ws::WebSocket, ConnectInfo, Path, State, WebSocketUpgrade}, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}, serve, Extension, Json, Router};
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::{net::{unix::SocketAddr, TcpListener}, sync::Mutex};
-use webrtc::{api::media_engine::MediaEngine, ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription}};
+use tokio::{net::{unix::SocketAddr, TcpListener}, sync::{mpsc::{channel, Receiver, Sender}, Mutex, OnceCell}};
+use webrtc::{api::media_engine::MediaEngine, ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription}};
 
-#[derive(Clone)]
-struct AppState {
-    offers: HashMap<String, RTCSessionDescription>, // Cameras
-    answers: HashMap<String, RTCSessionDescription> // Clients
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Cmd{
+    Offer(RTCSessionDescription),
+    Answer(RTCSessionDescription),
+    Candidate(RTCIceCandidate),
+    NotSupported
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Msg{
+    user: String,
+    cmd: Cmd,
 }
 
 
-
-#[derive(Serialize, Deserialize, Clone)]
-struct SignalMessage {
-
-    sdp: RTCSessionDescription,
-    candidate: RTCIceCandidateInit,
-}
-
-#[derive(Default)]
-struct State {
-    sdp: Option<SignalMessage>,
-    ice_candidates: Vec<RTCIceCandidateInit>,
-}
-type AppState1 = Arc<Mutex<HashMap<String, State>>>;
 #[tokio::main]
 async fn main() {
-    let db: HashMap<String, State> = HashMap::new(); // camera_id <-> SDP 
-    let state = Arc::new(Mutex::new(db));
+    // let state = Arc::new(Mutex::new(AppState::default()));
+    let state: Arc<Mutex<HashMap<String, Sender<Msg>>>> = Arc::new(Mutex::new(HashMap::new()));
     let listener = TcpListener::bind("0.0.0.0:3030").await.unwrap();
     let route = Router::new()
-        .route("/offer/:camera_id", post(offer_handler))
-        .route("/answer/:camera_id", post(answer_handler))
-        .route("/signal/:camera_id", get(get_signal))
-        .layer(axum::extract::Extension(state))
+        .route("/signaling/:peer_id", get(ws_user_connection_handler))
+        // .route("/streamer", get("ws_connection for device"))
+        // .route("/candidate", method_router)
+        // .route("/offer/:camera_id", post(offer_handler))
+        // .route("/offer/:camera_id", get(get_offer))
+        // .route("/answer/:camera_id", post(answer_handler))
+        // .route("/signal/:camera_id", get(get_answer))
+        // .route("/candidate/:camera_id", post(candidate_handler))
+        // .route("/candidate/:camera_id", get(get_candidate))
+        // .route("/candidate", get(get_all_candidate))
+        // .layer(Extension(state))
+        .with_state(state)
     ;
 
     serve(listener,route).await.unwrap();
 }
-async fn answer_handler(
-    Path(camera_id): Path<String>,
-    axum::extract::Extension(state): axum::extract::Extension<Arc<Mutex<AppState>>>,
-    Json(sdp): Json<RTCSessionDescription>
-)->impl IntoResponse{
-    let mut state = state.lock().await;
-    if let Some(s) = state.offers.get(&camera_id){
-        let s = s.clone();
-        let _ = state.answers.insert(camera_id, sdp);
-        Json(s).into_response()
-    } else {
-        StatusCode::NOT_FOUND.into_response()
+
+pub async fn ws_user_connection_handler(
+    Path(peer_id): Path<String>,
+    State(state): State<Arc<Mutex<HashMap<String, Sender<Msg>>>>>,
+    ws: WebSocketUpgrade
+) -> Response{
+    let (tx, rx) = channel(10);
+    {
+        state.lock().await.insert(peer_id, tx);
+    }
+    ws.on_upgrade(|ws|handle_user_ws(ws, rx, state))
+}
+
+pub async fn handle_user_ws(mut socket: WebSocket, mut rx: Receiver<Msg>, state: Arc<Mutex<HashMap<String, Sender<Msg>>>>){
+    let (mut sink,mut stream) = socket.split();
+    loop {
+        if let Ok(msg) = stream.try_next().await{
+            if let Some(msg) = msg{
+                let cmd = axum2reqwest_msg_convert(msg).json::<Msg>();
+                if let Ok(msg) = cmd{
+                    {
+                        let mut state = state.lock().await;
+                        if let Some(tx) = state.get(&msg.user){
+                            let user = msg.user.clone();
+                            if let Err(e) = tx.send(msg).await{
+                                eprintln!("{e}");
+                                state.remove(&user);
+                            }
+                        }
+                    }
+                } else {
+                    let msg = Cmd::NotSupported;
+                    let _ = sink.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await;
+                    continue;
+                }
+            } else {
+                break;
+            }
+        }
+        if let Ok(cmd) = rx.try_recv(){
+            if let Err(e) = sink.send(axum::extract::ws::Message::Text(serde_json::to_string(&cmd).unwrap())).await{
+                eprintln!("{e}");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }    
+}
+
+fn axum2reqwest_msg_convert(amsg: axum::extract::ws::Message) -> reqwest_websocket::Message{
+    match amsg{
+        axum::extract::ws::Message::Binary(b) => {
+            reqwest_websocket::Message::Binary(b)
+        },
+        axum::extract::ws::Message::Text(t) => {
+            reqwest_websocket::Message::Text(t)
+        },
+        axum::extract::ws::Message::Ping(ping) => {
+            reqwest_websocket::Message::Ping(ping)
+        },
+        axum::extract::ws::Message::Pong(pong) => {
+            reqwest_websocket::Message::Pong(pong)
+        },
+        _ => {
+            reqwest_websocket::Message::Close { code: reqwest_websocket::CloseCode::Normal, reason: "".to_string() }
+        }
     }
 }
-async fn get_signal(
-    Path(camera_id): Path<String>,
-    axum::extract::Extension(state): axum::extract::Extension<Arc<Mutex<AppState>>>,
-) -> impl IntoResponse{
-    let state = state.lock().await;
-    if let Some(sdp) = state.answers.get(&camera_id){
-        Json(sdp.clone()).into_response()
-    } else {
-        StatusCode::NOT_FOUND.into_response()
-    }
-}
-async fn offer_handler(
-    Path(camera_id): Path<String>,
-    axum::extract::Extension(state): axum::extract::Extension<Arc<Mutex<AppState>>>,
-    Json(sdp): Json<RTCSessionDescription>
-){
-    let mut state = state.lock().await;
-    state.offers.insert(camera_id, sdp);
-
-}
-// async fn ws_handler(
-//     ws: WebSocketUpgrade,
-//     user_agent: Option<TypedHeader<headers::UserAgent>>,
-//     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-// ) -> impl IntoResponse {
-//     let user_agent = if let Some(TypedHeader(user_agent)) = user_agent {
-//         user_agent.to_string()
-//     } else {
-//         String::from("Unknown browser")
-//     };
-//     println!("`{user_agent}` at {addr} connected.");
-//     // finalize the upgrade process by returning upgrade callback.
-//     // we can customize the callback by sending additional info such as address.
-//     ws.on_upgrade(move |socket| handle_socket(socket, addr))
-// }
-
-// async fn handle_socket(mut socket: WebSocket, who: SocketAddr) {
-
-// }
-
-
-
