@@ -7,7 +7,7 @@
 //! 
 
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use axum::{extract::{ws::WebSocket, ConnectInfo, Path, State, WebSocketUpgrade}, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}, serve, Extension, Json, Router};
 use futures::{SinkExt, StreamExt, TryStreamExt};
@@ -16,40 +16,51 @@ use tokio::{net::{unix::SocketAddr, TcpListener}, sync::{mpsc::{channel, Receive
 use webrtc::{api::media_engine::MediaEngine, ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription}};
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UserIceDto{
+    user_id: String,
+    ice: RTCIceCandidate
+}
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceIceDto{
     device_id: String,
+    camera_id: String,
     ice: RTCIceCandidate
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceOfferDto{
-    device_id: String,
+    user_id: String,
+    camera_id: String,
     offer: RTCSessionDescription
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceAnswerDto{
     device_id: String,
+    camera_id: String,
     answer: RTCSessionDescription
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Cmd{
-    Offer(DeviceOfferDto),
-    Answer(DeviceAnswerDto),
-    Candidate(DeviceIceDto),
+    OfferToDevice(DeviceOfferDto),
+    AnswerToUser(DeviceAnswerDto),
+    CandidateFromDevice(DeviceIceDto),
+    CandidateFromUser(UserIceDto),
     NotSupported
 }
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Msg{
-    user: String,
-    cmd: Cmd,
+
+struct Device{
+    pub connection: WebSocket,
+    pub cameras: HashSet<String>
 }
 
 struct AppState{
-    pub connections: HashMap<String, WebSocket>,
+    pub devices: HashMap<String, Device>,
+    pub users: HashMap<String, WebSocket>
 }
 impl AppState {
     pub fn new() -> Self{
         Self{
-            connections: HashMap::new()
+            devices: HashMap::new(),
+            users: HashMap::new(),
         }
     }
 }
@@ -59,23 +70,76 @@ async fn main() {
     let state = Arc::new(Mutex::new(AppState::new()));
     let listener = TcpListener::bind("0.0.0.0:3030").await.unwrap();
     let route = Router::new()
-        .route("/signaling/:device_id", get(ws_user_connection_handler))
-        .route("/offer/:device_id", post(post_offer))
-        .route("/answer/:device_id", post(post_answer))
-        .route("/candidate/:connected_deivce_id", post(post_candidate))
+        // Device EndPoints
+        .route("/device/signaling/:device_id", get(ws_device_connection_handler))
+        .route("/device/add_camera/:device_id/:camera_id", post(add_camera_to_device_handler))
+        .route("/device/answer/:user_id", post(post_answer_to_user_handler))
+        .route("/device/candidate/:user_id", post(post_device_candidate_handler))
+        // UserEndpoints
+        .route("/user/signaling/:user_id", get(ws_user_connection_handler))
+        .route("/user/offer/:device_id/:camera_id", post(post_offer_device_handler))
+        .route("/user/candidate/:device_id/:camera_id", post(post_user_candidate_handler))
+        //.route("/add_camera/:device_id", post(""))
+        //.route("/offer/:device_id/:camera_id", post(post_offer))
+        //.route("/answer/:device_id/:user_id", post(post_answer))
+        //.route("/candidate/:camera_user_id", post(post_candidate))
         .with_state(state)
     ;
 
     serve(listener,route).await.unwrap();
 }
-async fn post_candidate(
-    Path(connected_device_id): Path<String>,
+async fn post_user_candidate_handler(
+    Path(device_id): Path<String>,
+    Path(camera_id): Path<String>,
+    State(state): State<Arc<Mutex<AppState>>>,
+    Json(ice): Json<UserIceDto>
+) -> impl IntoResponse{
+    let mut state = state.lock().await;
+    if let Some(device) = state.devices.get_mut(&device_id){
+        let msg = Cmd::CandidateFromUser(ice);
+        if device.cameras.get(&camera_id).is_none(){
+            (axum::http::StatusCode::NOT_FOUND, "Camera not found on device!")
+        } else {
+            if let Err(e) = device.connection.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Connot send offer to device!")
+            } else {
+                (axum::http::StatusCode::OK, "Offer sended soccess!")
+            }
+        }
+    } else {
+        (axum::http::StatusCode::NOT_FOUND, "Device not found!")
+    }
+}
+async fn post_offer_device_handler(
+    Path(device_id): Path<String>,
+    Path(camera_id): Path<String>,
+    State(state): State<Arc<Mutex<AppState>>>,
+    Json(offer): Json<DeviceOfferDto>,
+) -> impl IntoResponse{
+    let mut state = state.lock().await;
+    if let Some(device) = state.devices.get_mut(&device_id){
+        let msg = Cmd::OfferToDevice(offer);
+        if device.cameras.get(&camera_id).is_none(){
+            (axum::http::StatusCode::NOT_FOUND, "Camera not found on device!")
+        } else {
+            if let Err(e) = device.connection.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Connot send offer to device!")
+            } else {
+                (axum::http::StatusCode::OK, "Offer sended soccess!")
+            }
+        }
+    } else {
+        (axum::http::StatusCode::NOT_FOUND, "Device not found!")
+    }
+}
+async fn post_device_candidate_handler(
+    Path(user_id): Path<String>,
     State(state): State<Arc<Mutex<AppState>>>,
     Json(ice): Json<DeviceIceDto>,
 ) -> impl IntoResponse{
     let mut state = state.lock().await;
-    if let Some(ws) = state.connections.get_mut(&connected_device_id){
-        let msg = Cmd::Candidate(ice);
+    if let Some(ws) = state.users.get_mut(&user_id){
+        let msg = Cmd::CandidateFromDevice(ice);
         if let Err(e) = ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         } else {
@@ -85,50 +149,118 @@ async fn post_candidate(
         (axum::http::StatusCode::NOT_FOUND, "DeviceNotFound".to_string())
     }
 }
-async fn post_offer(
-    Path(device_id): Path<String>,
-    State(state): State<Arc<Mutex<AppState>>>,
-    Json(sdp): Json<DeviceOfferDto>,
-) -> impl IntoResponse{
-    let mut state = state.lock().await;
-    if let Some(ws) = state.connections.get_mut(&device_id){
-        let msg = Cmd::Offer(sdp);
-        if let Err(e) = ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        } else {
-            (axum::http::StatusCode::OK, "Offer sended!".to_string())
-        }
-    } else {
-        (axum::http::StatusCode::NOT_FOUND, "DeviceNotFound".to_string())
-    }
-}
-async fn post_answer(
-    Path(device_id): Path<String>,
+async fn post_answer_to_user_handler(
+    Path(user_id): Path<String>,
     State(state): State<Arc<Mutex<AppState>>>,
     Json(sdp): Json<DeviceAnswerDto>,
 ) -> impl IntoResponse{
-    let mut state = state.lock().await;
-    if let Some(ws) = state.connections.get_mut(&device_id){
-        let msg = Cmd::Answer(sdp);
-        if let Err(e) = ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    if let Some(user) = state.lock().await.users.get_mut(&user_id){
+        let msg = Cmd::AnswerToUser(sdp);
+        if let Err(e) = user.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Cannot send sdp to user!")
         } else {
-            (axum::http::StatusCode::OK, "Answer sended!".to_string())
+            (axum::http::StatusCode::OK, "Send sdp to user soccess!")
         }
     } else {
-        (axum::http::StatusCode::NOT_FOUND, "DeviceNotFound".to_string())
+        (axum::http::StatusCode::NOT_FOUND, "User Not found!")
     }
 }
-async fn ws_user_connection_handler(
+async fn add_camera_to_device_handler(
+    Path(device_id): Path<String>,
+    Path(camera_id): Path<String>,
+    State(state): State<Arc<Mutex<AppState>>>,
+) -> impl IntoResponse{
+    if let Some(device) = state.lock().await.devices.get_mut(&device_id){
+        if device.cameras.insert(camera_id){
+            (axum::http::StatusCode::BAD_REQUEST, "Camera already exist")
+        } else {
+            (axum::http::StatusCode::OK, "Camera added soccesfuly!")
+        }
+    } else {
+        (axum::http::StatusCode::NOT_FOUND, "Device not found!")
+    }
+}
+async fn ws_device_connection_handler(
     Path(device_id): Path<String>,
     State(state): State<Arc<Mutex<AppState>>>,
     ws: WebSocketUpgrade
 ) -> Response{
-    ws.on_upgrade(|ws| handle_ws(ws, device_id, state))
+    ws.on_upgrade(|ws| handle_device_ws(ws, device_id, state))
 }
-async fn handle_ws(ws: WebSocket, device_id: String, state: Arc<Mutex<AppState>>){
-    state.lock().await.connections.insert(device_id, ws);    
+async fn handle_device_ws(ws: WebSocket, device_id: String, state: Arc<Mutex<AppState>>){
+    state.lock().await.devices.insert(device_id, Device { connection: ws, cameras: HashSet::new() });    
 }
+async fn ws_user_connection_handler(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<Mutex<AppState>>>,
+    ws: WebSocketUpgrade
+) -> Response{
+    ws.on_upgrade(|ws| handle_user_ws(ws, user_id, state))
+}
+async fn handle_user_ws(ws: WebSocket, user_id: String, state: Arc<Mutex<AppState>>){
+    state.lock().await.users.insert(user_id, ws);    
+}
+// async fn post_candidate(
+//     Path(connected_device_id): Path<String>,
+//     State(state): State<Arc<Mutex<AppState>>>,
+//     Json(ice): Json<DeviceIceDto>,
+// ) -> impl IntoResponse{
+//     let mut state = state.lock().await;
+//     if let Some(ws) = state.connections.get_mut(&connected_device_id){
+//         let msg = Cmd::Candidate(ice);
+//         if let Err(e) = ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
+//             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+//         } else {
+//             (axum::http::StatusCode::OK, "Candidate sended!".to_string())
+//         }
+//     } else {
+//         (axum::http::StatusCode::NOT_FOUND, "DeviceNotFound".to_string())
+//     }
+// }
+// async fn post_offer(
+//     Path(device_id): Path<String>,
+//     State(state): State<Arc<Mutex<AppState>>>,
+//     Json(sdp): Json<DeviceOfferDto>,
+// ) -> impl IntoResponse{
+//     let mut state = state.lock().await;
+//     if let Some(ws) = state.connections.get_mut(&device_id){
+//         let msg = Cmd::Offer(sdp);
+//         if let Err(e) = ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
+//             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+//         } else {
+//             (axum::http::StatusCode::OK, "Offer sended!".to_string())
+//         }
+//     } else {
+//         (axum::http::StatusCode::NOT_FOUND, "DeviceNotFound".to_string())
+//     }
+// }
+// async fn post_answer(
+//     Path(device_id): Path<String>,
+//     State(state): State<Arc<Mutex<AppState>>>,
+//     Json(sdp): Json<DeviceAnswerDto>,
+// ) -> impl IntoResponse{
+//     let mut state = state.lock().await;
+//     if let Some(device) = state.connections.get_mut(&device_id){
+//         let msg = Cmd::Answer(sdp);
+//         if let Err(e) = device.connection.send(axum::extract::ws::Message::Text(serde_json::to_string(&msg).unwrap())).await{
+//             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+//         } else {
+//             (axum::http::StatusCode::OK, "Answer sended!".to_string())
+//         }
+//     } else {
+//         (axum::http::StatusCode::NOT_FOUND, "DeviceNotFound".to_string())
+//     }
+// }
+// async fn ws_user_connection_handler(
+//     Path(device_id): Path<String>,
+//     State(state): State<Arc<Mutex<AppState>>>,
+//     ws: WebSocketUpgrade
+// ) -> Response{
+//     ws.on_upgrade(|ws| handle_ws(ws, device_id, state))
+// }
+// async fn handle_ws(ws: WebSocket, device_id: String, state: Arc<Mutex<AppState>>){
+//     state.lock().await.connections.insert(device_id, Device { connection: ws, cameras: HashSet::new() });    
+// }
 // pub async fn handle_user_ws(mut socket: WebSocket, mut rx: Receiver<Msg>, state: Arc<Mutex<HashMap<String, Sender<Msg>>>>){
 //     let (mut sink,mut stream) = socket.split();
 //     loop {
