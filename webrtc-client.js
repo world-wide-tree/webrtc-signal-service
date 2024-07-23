@@ -22,16 +22,22 @@ async function startConnection(deviceId, cameraId) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(candidate)
             });
-        }
+        } 
     };
 
     pc.ontrack = (event) => {
-        const video = document.getElementById('video');
-        if (video.srcObject !== event.streams[0]) {
-            video.srcObject = event.streams[0];
-        }
+        var el = document.createElement(event.track.kind);
+        el.srcObject = event.streams[0]
+        el.autoplay = true
+        el.controls = true
+        document.getElementById('video').appendChild(el)
+        // if (video.srcObject !== event.streams[0]) {
+        //     video.srcObject = event.streams[0];
+        // }
     };
-
+    pc.oniceconnectionstatechange = e => log(pc.iceConnectionState)
+    
+    console.log('local decs ', pc.localDescription);
     signalingSocket = new WebSocket(`${signalingServerUrl}/${userId}`);
     signalingSocket.onmessage = async (event) => {
         const msg = JSON.parse(event.data);
@@ -48,9 +54,10 @@ async function startConnection(deviceId, cameraId) {
     };
 
     signalingSocket.onopen = async () => {
+        console.log('Opened Ws');
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-
+        console.log('Getted offer', offer);
         const offerMsg = {
             user_id: userId,
             camera_id: cameraId,
@@ -59,7 +66,7 @@ async function startConnection(deviceId, cameraId) {
 
         fetch(`${offerUrl}/${deviceId}/${cameraId}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
             body: JSON.stringify(offerMsg)
         });
     };
@@ -80,6 +87,7 @@ async function stopConnection() {
 document.getElementById('startBtn').addEventListener('click', () => {
     const deviceId = document.getElementById('deviceId').value;
     const cameraId = document.getElementById('cameraId').value;
+    console.log('Start App', deviceId, cameraId);
     startConnection(deviceId, cameraId);
 });
 

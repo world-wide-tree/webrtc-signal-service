@@ -13,6 +13,7 @@ use axum::{extract::{ws::WebSocket, ConnectInfo, Path, State, WebSocketUpgrade},
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::{net::{unix::SocketAddr, TcpListener}, sync::{mpsc::{channel, Receiver, Sender}, Mutex, OnceCell}};
+use tower_http::cors::{Any, CorsLayer};
 use webrtc::{api::media_engine::MediaEngine, ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription}};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,8 +65,13 @@ impl AppState {
         }
     }
 }
+
 #[tokio::main]
 async fn main() {
+    let cors = CorsLayer::new()
+        .allow_origin(Any) // Allow requests from any origin
+        .allow_methods(Any) // Allow any HTTP methods (GET, POST, etc.)
+        .allow_headers(Any); // Allow any header
     // let state = Arc::new(Mutex::new(AppState::default()));
     let state = Arc::new(Mutex::new(AppState::new()));
     let listener = TcpListener::bind("0.0.0.0:3030").await.unwrap();
@@ -84,13 +90,13 @@ async fn main() {
         //.route("/answer/:device_id/:user_id", post(post_answer))
         //.route("/candidate/:camera_user_id", post(post_candidate))
         .with_state(state)
+        .layer(cors)
     ;
 
     serve(listener,route).await.unwrap();
 }
 async fn post_user_candidate_handler(
-    Path(device_id): Path<String>,
-    Path(camera_id): Path<String>,
+    Path((device_id, camera_id)): Path<(String, String)>,
     State(state): State<Arc<Mutex<AppState>>>,
     Json(ice): Json<UserIceDto>
 ) -> impl IntoResponse{
@@ -111,14 +117,14 @@ async fn post_user_candidate_handler(
     }
 }
 async fn post_offer_device_handler(
-    Path(device_id): Path<String>,
-    Path(camera_id): Path<String>,
+    Path((device_id, camera_id)): Path<(String, String)>,
     State(state): State<Arc<Mutex<AppState>>>,
     Json(offer): Json<DeviceOfferDto>,
 ) -> impl IntoResponse{
     let mut state = state.lock().await;
     if let Some(device) = state.devices.get_mut(&device_id){
         let msg = Cmd::OfferToDevice(offer);
+        println!("Device cameras: {:#?}", device.cameras);
         if device.cameras.get(&camera_id).is_none(){
             (axum::http::StatusCode::NOT_FOUND, "Camera not found on device!")
         } else {
@@ -166,14 +172,16 @@ async fn post_answer_to_user_handler(
     }
 }
 async fn add_camera_to_device_handler(
-    Path(device_id): Path<String>,
-    Path(camera_id): Path<String>,
+    Path((device_id,camera_id)): Path<(String, String)>,
     State(state): State<Arc<Mutex<AppState>>>,
 ) -> impl IntoResponse{
     if let Some(device) = state.lock().await.devices.get_mut(&device_id){
-        if device.cameras.insert(camera_id){
+        println!("Device cameras: {:#?}", device.cameras);
+        if !device.cameras.insert(camera_id){
+            println!("Device cameras: {:#?}", device.cameras);
             (axum::http::StatusCode::BAD_REQUEST, "Camera already exist")
         } else {
+            println!("Device cameras: {:#?}", device.cameras);
             (axum::http::StatusCode::OK, "Camera added soccesfuly!")
         }
     } else {
