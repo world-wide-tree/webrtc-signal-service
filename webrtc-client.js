@@ -15,11 +15,12 @@ async function startConnection(deviceId, cameraId) {
         if (event.candidate) {
             const candidate = {
                 user_id: userId,
-                ice: event.candidate
+                ice: event.candidate.candidate
             };
+            console.log(JSON.stringify(candidate));
             fetch(`${candidateUrl}/${deviceId}/${cameraId}`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
                 body: JSON.stringify(candidate)
             });
         } 
@@ -35,21 +36,26 @@ async function startConnection(deviceId, cameraId) {
         //     video.srcObject = event.streams[0];
         // }
     };
-    pc.oniceconnectionstatechange = e => log(pc.iceConnectionState)
-    
-    console.log('local decs ', pc.localDescription);
+    pc.oniceconnectionstatechange = e => {
+        console.log(pc.iceConnectionState);
+    }
+    pc.addTransceiver('video', {direction: 'recvonly'})
+    console.log('local decs ', JSON.stringify(pc.localDescription));
     signalingSocket = new WebSocket(`${signalingServerUrl}/${userId}`);
     signalingSocket.onmessage = async (event) => {
+        console.log(event.data);
         const msg = JSON.parse(event.data);
-        switch (msg.type) {
-            case 'AnswerToUser':
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
-                break;
-            case 'CandidateFromDevice':
-                await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
-                break;
-            default:
-                console.error('Unknown message type:', msg.type);
+        if (msg.hasOwnProperty('CandidateFromDevice')){
+            console.log(msg.CandidateFromDevice.ice);
+            await pc.addIceCandidate({camdidate: msg.CandidateFromDevice.ice});
+        } else if (msg.hasOwnProperty('AnswerToUser')){
+            console.log(msg.AnswerToUser.answer);
+            
+            try {
+                pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(atob(msg.AnswerToUser.answer))))
+            } catch (e) {
+                alert(e)
+            }
         }
     };
 
@@ -57,11 +63,12 @@ async function startConnection(deviceId, cameraId) {
         console.log('Opened Ws');
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        console.log('Getted offer', offer);
+        let offer_sdp = btoa(JSON.stringify(offer));
+        // console.log('Getted offer', offer_sdp);
         const offerMsg = {
             user_id: userId,
             camera_id: cameraId,
-            offer: offer
+            offer: offer_sdp
         };
 
         fetch(`${offerUrl}/${deviceId}/${cameraId}`, {

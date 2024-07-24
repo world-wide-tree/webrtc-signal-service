@@ -19,25 +19,25 @@ use webrtc::{api::media_engine::MediaEngine, ice_transport::ice_candidate::{RTCI
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserIceDto{
     user_id: String,
-    ice: RTCIceCandidate
+    ice: String
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceIceDto{
     device_id: String,
     camera_id: String,
-    ice: RTCIceCandidate
+    ice: String
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceOfferDto{
     user_id: String,
     camera_id: String,
-    offer: RTCSessionDescription
+    offer: String
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceAnswerDto{
     device_id: String,
     camera_id: String,
-    answer: RTCSessionDescription
+    answer: String
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Cmd{
