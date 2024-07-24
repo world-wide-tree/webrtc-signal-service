@@ -27,11 +27,12 @@ async function startConnection(deviceId, cameraId) {
     };
 
     pc.ontrack = (event) => {
-        var el = document.createElement(event.track.kind);
-        el.srcObject = event.streams[0]
-        el.autoplay = true
-        el.controls = true
-        document.getElementById('video').appendChild(el)
+        var video = document.getElementById("StreamVideo");
+        video.srcObject = event.streams[0];
+        // el.srcObject = event.streams[0]
+        // el.autoplay = true
+        // el.controls = true
+        // document.getElementById('wvideo').appendChild(el)
         // if (video.srcObject !== event.streams[0]) {
         //     video.srcObject = event.streams[0];
         // }
@@ -39,7 +40,7 @@ async function startConnection(deviceId, cameraId) {
     pc.oniceconnectionstatechange = e => {
         console.log(pc.iceConnectionState);
     }
-    pc.addTransceiver('video', {direction: 'recvonly'})
+    pc.addTransceiver('video', {direction: 'sendrecv'})
     console.log('local decs ', JSON.stringify(pc.localDescription));
     signalingSocket = new WebSocket(`${signalingServerUrl}/${userId}`);
     signalingSocket.onmessage = async (event) => {
